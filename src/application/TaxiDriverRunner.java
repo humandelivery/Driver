@@ -13,11 +13,12 @@ public class TaxiDriverRunner {
     public void run() throws Exception {
         Scanner scanner = new Scanner(System.in);
 
-        System.out.print("input id: ");
-        String loginId = scanner.nextLine();
-        System.out.print("input password: ");
-        String password = scanner.nextLine();
-
+//        System.out.print("input id: ");
+//        String loginId = scanner.nextLine();
+//        System.out.print("input password: ");
+//        String password = scanner.nextLine();
+        String loginId = "driver001@example.com";
+        String password = "securePass123!";
         String token = RestTemplateToken.RequestLogin(loginId, password);
 
         System.out.println("are you there? token " + token);

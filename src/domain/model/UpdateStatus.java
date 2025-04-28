@@ -1,13 +1,13 @@
 package domain.model;
 
 public class UpdateStatus {
-    private String status;
+    private TaxiDriverStatus status;
 
-    public String getStatus() {
+    public TaxiDriverStatus getStatus() {
         return status;
     }
 
-    public void setStatus(String status) {
+    public void setStatus(TaxiDriverStatus status) {
         this.status = status;
     }
 }

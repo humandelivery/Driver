@@ -1,17 +1,13 @@
 package application;
 
-import domain.model.TaxiDriverStatus;
-import domain.model.UpdateLocationRequest;
-import domain.model.UpdateStatus;
-
+import domain.model.*;
 
 import java.lang.reflect.Type;
+import java.util.Scanner;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import domain.model.UpdateTaxiDriverStatusResponse;
-import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.simp.stomp.StompFrameHandler;
 import org.springframework.messaging.simp.stomp.StompHeaders;
@@ -22,13 +18,17 @@ import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.messaging.WebSocketStompClient;
 
 public class ClientService {
+
     private StompSession stompSession;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private boolean readyToReceiveCall = false; // 빈차 여부
+    // 운행 중 여부
+    private boolean driving = false;
+    //손님 없으면 none으로 보내기 위함
+    private String currentCustomerLoginId = "none";
 
     public void connectWithToken(String jwtToken) {
         WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
-
-        // JSON <-> 객체 간 변환을 자동으로 해준다.
         stompClient.setMessageConverter(new MappingJackson2MessageConverter());
 
         WebSocketHttpHeaders httpHeaders = new WebSocketHttpHeaders();
@@ -40,74 +40,212 @@ public class ClientService {
         stompClient.connectAsync(url, httpHeaders, stompHeaders, new StompSessionHandlerAdapter() {
             @Override
             public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
-                System.out.println("WebSocket success : " + session.getSessionId());
-
+                System.out.println("WebSocket connected: " + session.getSessionId());
                 stompSession = session;
 
-                stompSession.subscribe("/user/queue/taxi-driver-status", new StompFrameHandler() {
-                    @Override
-                    public Type getPayloadType(StompHeaders headers) {
-                        return UpdateTaxiDriverStatusResponse.class;
-                    }
+                //택시 상태 수신
+                subscribeTaxiDriverStatus();
 
-                    @Override
-                    public void handleFrame(StompHeaders headers, Object payload) {
+                //콜 요청 수신
+                subscribeCallRequest();
 
-                        if (payload instanceof UpdateTaxiDriverStatusResponse) {
-                            UpdateTaxiDriverStatusResponse response = (UpdateTaxiDriverStatusResponse)payload;
-                            System.out.println("response.getTaxiDriverStatus() = " + response.getTaxiDriverStatus());
-                            System.out.println("response.getRequestStatus() = " + response.getRequestStatus());
-                        }
+                //콜 수락 결과 수신
+                subscribeAcceptCallResult();
 
-                    }
-                });
+                //콜 거절 결과 수신
+                subscribeRejectCallResult();
 
-                //상태 변경
-                UpdateStatus request = new UpdateStatus();
+                //차 상태 설정
+                sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
 
-                request.setStatus(TaxiDriverStatus.AVAILABLE);
-                stompSession.send("/app/taxi-driver/update-status", request);
-
-
-                System.out.println("Sent taxi driver status update: driving~");
-
-                //콜 요청 or 거절
-
-
-                //요청 할 경우 택시 기사 정보 보내야함
-
-                //운행 상태도 보내야함
-
-                //하차 후 운행 종료 메세지 보내야함
-
-                //기사가 쉴 때, 운행 종료했을 때 요청도 보내야함
-
+                //위치 전송 스케줄러 시작
+                startSendingLocation();
             }
 
             @Override
             public void handleTransportError(StompSession session, Throwable exception) {
-                System.out.println("WebSocket connecting error : " + exception.getMessage());
+                System.out.println("WebSocket error: " + exception.getMessage());
             }
         });
 
-        System.out.println("WebSocket connection initiated.");
+        System.out.println("Connecting to WebSocket server...");
     }
 
+    //택시 상태 수신
+    private void subscribeTaxiDriverStatus() {
+        stompSession.subscribe("/user/queue/taxi-driver-status", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return UpdateTaxiDriverStatusResponse.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                if (payload instanceof UpdateTaxiDriverStatusResponse response) {
+                    if (response.getTaxiDriverStatus() == TaxiDriverStatus.AVAILABLE) {
+                        System.out.println("Taxi ready");
+                        readyToReceiveCall = true;
+                    } else {
+                        System.out.println("no call");
+                        readyToReceiveCall = false;
+                    }
+
+                }
+            }
+        });
+    }
+
+
+    //콜 요청 수신
+    private void subscribeCallRequest() {
+        stompSession.subscribe("/user/queue/call-request", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return CallMessageResponse.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                if (!readyToReceiveCall) {
+                    System.out.println("Not ready");
+                    return;
+                }
+
+                if (payload instanceof CallMessageResponse callRequest) {
+                    System.out.println("Call ID: " + callRequest.getCallId());
+                    System.out.println("Origin: (" + callRequest.getExpectedOrigin().getLatitude() + ", " + callRequest.getExpectedOrigin().getLongtitude() + ")");
+                    System.out.println("Destination: (" + callRequest.getExpectedDestination().getLatitude() + ", " + callRequest.getExpectedDestination().getLongtitude() + ")");
+
+                    Scanner scanner = new Scanner(System.in);
+                    System.out.print("Accept call (yes/no): ");
+                    String input = scanner.nextLine().trim().toLowerCase();
+
+                    if ("yes".equals(input)) {
+                        CallAcceptRequest acceptRequest = new CallAcceptRequest();
+                        acceptRequest.setCallId(callRequest.getCallId());
+                        stompSession.send("/api/taxi-driver/accept-call", acceptRequest);
+                        System.out.println("Send call accept");
+                    } else {
+                        CallRejectRequest rejectRequest = new CallRejectRequest();
+                        rejectRequest.setCallId(callRequest.getCallId());
+                        stompSession.send("/api/taxi-driver/reject-call", rejectRequest);
+                        System.out.println("Send call reject");
+                    }
+                }
+            }
+        });
+    }
+
+
+    //콜 수락 결과 수신
+    private void subscribeAcceptCallResult() {
+        stompSession.subscribe("/user/queue/accept-call-result", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return CallAcceptResponse.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                if (payload instanceof CallAcceptResponse response) {
+                    MatchingResponse matching = response.getMatchingResponse();
+                    if (matching != null) {
+                        System.out.println("Call accept success");
+                        System.out.println("Customer id : " + matching.getCustomerLoginId());
+                        System.out.println("customer origin : " + matching.getExpectedOrigin());
+                        System.out.println("customer des : " + matching.getExpectedDestination());
+                        currentCustomerLoginId = matching.getCustomerLoginId();
+                        driving = true;
+                        //예약중!!!!!
+                        sendTaxiDriverStatus(TaxiDriverStatus.RESERVED);
+                        readyToReceiveCall = false;
+
+                        //운행 종료
+                        drivingFinish();
+                    } else {
+                        System.out.println("Not match");
+                    }
+                }
+            }
+        });
+    }
+
+    //콜 거절 결과 수신
+    private void subscribeRejectCallResult() {
+        stompSession.subscribe("/user/queue/reject-call-result", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return CallRejectResponse.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                if (payload instanceof CallRejectResponse response) {
+                        System.out.println("Call reject");
+                        sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
+                }
+            }
+        });
+    }
+
+
+    //차 상태 바꾸기 - 구독 아님
+    public void sendTaxiDriverStatus(TaxiDriverStatus status) {
+        UpdateStatus request = new UpdateStatus();
+        request.setStatus(status);
+        stompSession.send("/app/taxi-driver/update-status", request);
+        System.out.println("Send taxi status " + status);
+    }
+
+
+    //위치 전송 스케줄러 시작
     private void startSendingLocation() {
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 if (stompSession != null && stompSession.isConnected()) {
-                    UpdateLocationRequest location = new UpdateLocationRequest();
-                    location.setLatitude(37.56);
-                    location.setLongitude(126.97);
+                    UpdateLocationRequest locationRequest = new UpdateLocationRequest();
+                    locationRequest.setCustomerLoginId(currentCustomerLoginId);
 
-                    stompSession.send("/app/taxi-driver/location", location);
-                    System.out.println("location push: (" + location.getLatitude() + ", " + location.getLongitude() + ")");
+                    Location location = new Location();
+                    location.setLatitude(37.56);
+                    location.setLongtitude(126.97);
+
+                    locationRequest.setLocation(location);
+
+                    stompSession.send("/app/taxi-driver/update-location", locationRequest);
+                    System.out.println("location push : (" + location.getLatitude() + ", " + location.getLongtitude() + ") to customer: " + currentCustomerLoginId);
                 }
             } catch (Exception e) {
-                System.out.println("Failed to send location: " + e.getMessage());
+                System.out.println("Fail send location: " + e.getMessage());
             }
         }, 0, 5, TimeUnit.SECONDS);
     }
 
+    //손님 내릴 때
+    private void drivingFinish() {
+        new Thread(() -> {
+            Scanner scanner = new Scanner(System.in);
+            while (true) {
+                System.out.print("finish ride: ");
+                String input = scanner.nextLine().trim().toLowerCase();
+                if ("finish".equals(input)) {
+                    finishDriving();
+                    break;
+                }
+            }
+        }).start();
+    }
+
+    private void finishDriving() {
+        if (!driving) {
+            System.out.println("driving~");
+            return;
+        }
+
+        System.out.println("sonnim naerim");
+        //진규님이 말씀하ㄴ걸로 바꿔놔야함
+        this.currentCustomerLoginId = "none";
+        this.driving = false;
+        sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
+    }
 }

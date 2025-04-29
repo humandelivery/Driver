@@ -24,8 +24,8 @@ public class ClientService {
     private boolean readyToReceiveCall = false; // 빈차 여부
     // 운행 중 여부
     private boolean driving = false;
-    //손님 없으면 none으로 보내기 위함
-    private String currentCustomerLoginId = "none";
+    //손님 없으면 null로 보내기 위함
+    private String currentCustomerLoginId = null;
 
     public void connectWithToken(String jwtToken) {
         WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
@@ -46,6 +46,13 @@ public class ClientService {
                 //택시 상태 수신
                 subscribeTaxiDriverStatus();
 
+
+                //차 상태 설정
+                sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
+
+                //위치 전송 스케줄러 시작
+                startSendingLocation();
+
                 //콜 요청 수신
                 subscribeCallRequest();
 
@@ -55,11 +62,7 @@ public class ClientService {
                 //콜 거절 결과 수신
                 subscribeRejectCallResult();
 
-                //차 상태 설정
-                sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
 
-                //위치 전송 스케줄러 시작
-                startSendingLocation();
             }
 
             @Override
@@ -113,14 +116,14 @@ public class ClientService {
 
                 if (payload instanceof CallMessageResponse callRequest) {
                     System.out.println("Call ID: " + callRequest.getCallId());
-                    System.out.println("Origin: (" + callRequest.getExpectedOrigin().getLatitude() + ", " + callRequest.getExpectedOrigin().getLongtitude() + ")");
-                    System.out.println("Destination: (" + callRequest.getExpectedDestination().getLatitude() + ", " + callRequest.getExpectedDestination().getLongtitude() + ")");
+                    System.out.println("Origin: (" + callRequest.getExpectedOrigin().getLatitude() + ", " + callRequest.getExpectedOrigin().getLongitude() + ")");
+                    System.out.println("Dest : (" + callRequest.getExpectedDestination().getLatitude() + ", " + callRequest.getExpectedDestination().getLongitude() + ")");
 
                     Scanner scanner = new Scanner(System.in);
-                    System.out.print("Accept call (yes/no): ");
+                    System.out.print("Accept call (yes/no):  yes - 1 ");
                     String input = scanner.nextLine().trim().toLowerCase();
 
-                    if ("yes".equals(input)) {
+                    if ("1".equals(input)) {
                         CallAcceptRequest acceptRequest = new CallAcceptRequest();
                         acceptRequest.setCallId(callRequest.getCallId());
                         stompSession.send("/api/taxi-driver/accept-call", acceptRequest);
@@ -156,14 +159,26 @@ public class ClientService {
                         System.out.println("customer des : " + matching.getExpectedDestination());
                         currentCustomerLoginId = matching.getCustomerLoginId();
                         driving = true;
+
                         //예약중!!!!!
                         sendTaxiDriverStatus(TaxiDriverStatus.RESERVED);
+                        System.out.println("reserved");
                         readyToReceiveCall = false;
 
-                        //운행 종료
-                        drivingFinish();
-                    } else {
-                        System.out.println("Not match");
+                        //출발
+                        scheduler.schedule(() -> {
+                            sendTaxiDriverStatus(TaxiDriverStatus.ON_DRIVING);
+                            System.out.println("on driving");
+                        }, 5, TimeUnit.SECONDS);
+
+                        //손님 내려줌
+                        scheduler.schedule(() -> {
+                            currentCustomerLoginId = null;
+                            driving = false;
+                            sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
+                            System.out.println("available");
+                        }, 10, TimeUnit.SECONDS);
+
                     }
                 }
             }
@@ -189,6 +204,7 @@ public class ClientService {
     }
 
 
+
     //차 상태 바꾸기 - 구독 아님
     public void sendTaxiDriverStatus(TaxiDriverStatus status) {
         UpdateStatus request = new UpdateStatus();
@@ -208,12 +224,12 @@ public class ClientService {
 
                     Location location = new Location();
                     location.setLatitude(37.56);
-                    location.setLongtitude(126.97);
+                    location.setLongitude(126.97);
 
                     locationRequest.setLocation(location);
 
                     stompSession.send("/app/taxi-driver/update-location", locationRequest);
-                    System.out.println("location push : (" + location.getLatitude() + ", " + location.getLongtitude() + ") to customer: " + currentCustomerLoginId);
+                    System.out.println("location push : (" + location.getLatitude() + ", " + location.getLongitude() + ") " + currentCustomerLoginId);
                 }
             } catch (Exception e) {
                 System.out.println("Fail send location: " + e.getMessage());
@@ -221,31 +237,8 @@ public class ClientService {
         }, 0, 5, TimeUnit.SECONDS);
     }
 
-    //손님 내릴 때
-    private void drivingFinish() {
-        new Thread(() -> {
-            Scanner scanner = new Scanner(System.in);
-            while (true) {
-                System.out.print("finish ride: ");
-                String input = scanner.nextLine().trim().toLowerCase();
-                if ("finish".equals(input)) {
-                    finishDriving();
-                    break;
-                }
-            }
-        }).start();
-    }
 
-    private void finishDriving() {
-        if (!driving) {
-            System.out.println("driving~");
-            return;
-        }
 
-        System.out.println("sonnim naerim");
-        //진규님이 말씀하ㄴ걸로 바꿔놔야함
-        this.currentCustomerLoginId = "none";
-        this.driving = false;
-        sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
-    }
+
+
 }

@@ -26,6 +26,8 @@ public class ClientService {
     private boolean driving = false;
     //손님 없으면 null로 보내기 위함
     private String currentCustomerLoginId = null;
+    //순서 보장을 위한 수신 했는지에 대한 flag
+    private boolean checkReceive = false;
 
     public void connectWithToken(String jwtToken) {
         WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
@@ -43,9 +45,11 @@ public class ClientService {
                 System.out.println("WebSocket connected: " + session.getSessionId());
                 stompSession = session;
 
+                //에러메세지 구독
+                subscribeErrorMessages();
+
                 //택시 상태 수신
                 subscribeTaxiDriverStatus();
-
 
                 //차 상태 설정
                 sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
@@ -87,6 +91,7 @@ public class ClientService {
                 if (payload instanceof UpdateTaxiDriverStatusResponse response) {
                     if (response.getTaxiDriverStatus() == TaxiDriverStatus.AVAILABLE) {
                         System.out.println("Taxi ready");
+                        checkReceive = true;
                         readyToReceiveCall = true;
                     } else {
                         System.out.println("no call");
@@ -119,6 +124,7 @@ public class ClientService {
                     System.out.println("Origin: (" + callRequest.getExpectedOrigin().getLatitude() + ", " + callRequest.getExpectedOrigin().getLongitude() + ")");
                     System.out.println("Dest : (" + callRequest.getExpectedDestination().getLatitude() + ", " + callRequest.getExpectedDestination().getLongitude() + ")");
 
+                    //수락 거절은 어쩔 수 없음 입력 받아야함
                     Scanner scanner = new Scanner(System.in);
                     System.out.print("Accept call (yes/no):  yes - 1 ");
                     String input = scanner.nextLine().trim().toLowerCase();
@@ -203,6 +209,21 @@ public class ClientService {
         });
     }
 
+    //error 구독
+//    user/queue/errors
+    private void subscribeErrorMessages() {
+        stompSession.subscribe("/user/queue/errors", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return ErrorResponse.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                System.out.println("Error Message : " + payload);
+            }
+        });
+    }
 
 
     //차 상태 바꾸기 - 구독 아님
@@ -218,7 +239,8 @@ public class ClientService {
     private void startSendingLocation() {
         scheduler.scheduleAtFixedRate(() -> {
             try {
-                if (stompSession != null && stompSession.isConnected()) {
+                //일단은 응답 받으면 checkReceive가 true니깐 그때 받을 수 있게 해둠
+                if (stompSession != null && stompSession.isConnected() && checkReceive) {
                     UpdateLocationRequest locationRequest = new UpdateLocationRequest();
                     locationRequest.setCustomerLoginId(currentCustomerLoginId);
 
@@ -236,8 +258,6 @@ public class ClientService {
             }
         }, 0, 5, TimeUnit.SECONDS);
     }
-
-
 
 
 

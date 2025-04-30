@@ -55,7 +55,7 @@ public class ClientService {
                 sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
 
                 //위치 전송 스케줄러 시작
-                startSendingLocation();
+                // startSendingLocation();
 
                 //콜 요청 수신
                 subscribeCallRequest();
@@ -91,6 +91,7 @@ public class ClientService {
                 if (payload instanceof UpdateTaxiDriverStatusResponse response) {
                     if (response.getTaxiDriverStatus() == TaxiDriverStatus.AVAILABLE) {
                         System.out.println("Taxi ready");
+                        startSendingLocation();
                         checkReceive = true;
                         readyToReceiveCall = true;
                     } else {
@@ -106,7 +107,9 @@ public class ClientService {
 
     //콜 요청 수신
     private void subscribeCallRequest() {
-        stompSession.subscribe("/user/queue/call-request", new StompFrameHandler() {
+        stompSession.subscribe("/user/queue/call", new StompFrameHandler() {
+
+     //   stompSession.subscribe("/user/queue/call-request", new StompFrameHandler() {
             @Override
             public Type getPayloadType(StompHeaders headers) {
                 return CallMessageResponse.class;
@@ -240,7 +243,7 @@ public class ClientService {
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 //일단은 응답 받으면 checkReceive가 true니깐 그때 받을 수 있게 해둠
-                if (stompSession != null && stompSession.isConnected() && checkReceive) {
+                if (stompSession != null && stompSession.isConnected()) {
                     UpdateLocationRequest locationRequest = new UpdateLocationRequest();
                     locationRequest.setCustomerLoginId(currentCustomerLoginId);
 
@@ -257,6 +260,27 @@ public class ClientService {
                 System.out.println("Fail send location: " + e.getMessage());
             }
         }, 0, 5, TimeUnit.SECONDS);
+    }
+
+    //test용
+    public ScheduledExecutorService getScheduler() {
+        return scheduler;
+    }
+
+    public String getCurrentCustomerLoginId() {
+        return currentCustomerLoginId;
+    }
+
+    public void setCurrentCustomerLoginId(String id) {
+        this.currentCustomerLoginId = id;
+    }
+
+    public boolean isDriving() {
+        return driving;
+    }
+
+    public void setDriving(boolean value) {
+        this.driving = value;
     }
 
 

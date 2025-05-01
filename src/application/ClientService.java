@@ -3,10 +3,9 @@ package application;
 import domain.model.*;
 
 import java.lang.reflect.Type;
+import java.util.Random;
 import java.util.Scanner;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.simp.stomp.StompFrameHandler;
@@ -21,13 +20,23 @@ public class ClientService {
 
     private StompSession stompSession;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private boolean readyToReceiveCall = false; // 빈차 여부
     // 운행 중 여부
     private boolean driving = false;
     //손님 없으면 null로 보내기 위함
     private String currentCustomerLoginId = null;
     //순서 보장을 위한 수신 했는지에 대한 flag
     private boolean checkReceive = false;
+    //큐 필드 추가 하나으 ㅣ쓰레드가 callqueue를 3초에 한번씩 조회 하나씩 다 검증 배차 됐나 안됐나 ㅋㅋ
+    private final BlockingQueue<CallMessageResponse> callQueue = new LinkedBlockingQueue<>();
+    private volatile boolean processingCall = false;
+    //택시 상태 확인
+    private volatile TaxiDriverStatus currentStatus = TaxiDriverStatus.AVAILABLE;
+
+    //콜 처리 스레드 시작 됨?
+    private boolean callConsumerStarted = false;
+
+
+
 
     public void connectWithToken(String jwtToken) {
         WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
@@ -89,22 +98,45 @@ public class ClientService {
             @Override
             public void handleFrame(StompHeaders headers, Object payload) {
                 if (payload instanceof UpdateTaxiDriverStatusResponse response) {
-                    if (response.getTaxiDriverStatus() == TaxiDriverStatus.AVAILABLE) {
-                        System.out.println("Taxi ready");
-                        startSendingLocation();
-                        checkReceive = true;
-                        readyToReceiveCall = true;
-                    } else {
-                        System.out.println("no call");
-                        readyToReceiveCall = false;
-                    }
+                    TaxiDriverStatus status = response.getTaxiDriverStatus();
+                    currentStatus = status;
+                    if (status == TaxiDriverStatus.AVAILABLE) {
+                        System.out.println("AVAILABLE");
 
+                        //진심 개거슬리는부분
+                        //하나로 묶을 방법을 찾고싶음
+
+                        if (!checkReceive) {
+                            checkReceive = true;
+                            startSendingLocation();
+                        }
+
+
+                        if (!callConsumerStarted) {
+                            startCallQueueConsumer();
+                            callConsumerStarted = true;
+                        }
+
+                    } else if (status == TaxiDriverStatus.RESERVED || status == TaxiDriverStatus.ON_DRIVING) {
+                        System.out.println("RESERVED / ON_DRIVING");
+
+
+                    } else if (status == TaxiDriverStatus.OFF_DUTY) {
+                        System.out.println("OFF_DUTY");
+
+                        checkReceive = false;
+                        // stopSendingLocation();
+                    } else {
+                        System.out.println("ERROR STATUS: " + status);
+
+                    }
                 }
             }
         });
     }
 
 
+    //off- duty
     //콜 요청 수신
     private void subscribeCallRequest() {
         stompSession.subscribe("/user/queue/call", new StompFrameHandler() {
@@ -117,37 +149,71 @@ public class ClientService {
 
             @Override
             public void handleFrame(StompHeaders headers, Object payload) {
-                if (!readyToReceiveCall) {
+                //빈차 상태이냐?
+                if (currentStatus != TaxiDriverStatus.AVAILABLE) {
                     System.out.println("Not ready");
                     return;
                 }
 
                 if (payload instanceof CallMessageResponse callRequest) {
-                    System.out.println("Call ID: " + callRequest.getCallId());
-                    System.out.println("Origin: (" + callRequest.getExpectedOrigin().getLatitude() + ", " + callRequest.getExpectedOrigin().getLongitude() + ")");
-                    System.out.println("Dest : (" + callRequest.getExpectedDestination().getLatitude() + ", " + callRequest.getExpectedDestination().getLongitude() + ")");
-
-                    //수락 거절은 어쩔 수 없음 입력 받아야함
-                    Scanner scanner = new Scanner(System.in);
-                    System.out.print("Accept call (yes/no):  yes - 1 ");
-                    String input = scanner.nextLine().trim().toLowerCase();
-
-                    if ("1".equals(input)) {
-                        CallAcceptRequest acceptRequest = new CallAcceptRequest();
-                        acceptRequest.setCallId(callRequest.getCallId());
-                        stompSession.send("/api/taxi-driver/accept-call", acceptRequest);
-                        System.out.println("Send call accept");
-                    } else {
-                        CallRejectRequest rejectRequest = new CallRejectRequest();
-                        rejectRequest.setCallId(callRequest.getCallId());
-                        stompSession.send("/api/taxi-driver/reject-call", rejectRequest);
-                        System.out.println("Send call reject");
-                    }
+                    System.out.println("Queue Call ID: " + callRequest.getCallId());
+                    //콜 쌓음 (producer)
+                    callQueue.offer(callRequest);
                 }
             }
         });
     }
 
+    //콜을 수락했을
+
+    //콜 꺼내서 처리해야함 골 아픔
+    private void startCallQueueConsumer() {
+        new Thread(() -> {
+            Random random = new Random();
+            ExecutorService inputExecutor = Executors.newSingleThreadExecutor();
+            while (true) {
+                try {
+                    //콜 큐에서 꺼내기(consumer)
+                    //take
+                    CallMessageResponse request = callQueue.take();
+
+
+
+                    // 현재 콜 처리 시작
+                    processingCall = true;
+
+                    System.out.println("processing ID: " + request.getCallId());
+                    System.out.println("Origin: " + request.getExpectedOrigin());
+                    System.out.println("Dest: " + request.getExpectedDestination());
+
+                    int decision = random.nextInt(10);
+                    boolean accept = decision % 2 == 1;  // 홀수면 수락
+
+                    System.out.println("랜덤 처리 번호: " + decision + " → " + (accept ? "수락" : "거절"));
+
+                    Thread.sleep(1000); // 약간의 대기 (너무 빠르면 서버 감당 힘들 수도)
+
+                    if (accept) {
+                        CallAcceptRequest acceptRequest = new CallAcceptRequest();
+                        acceptRequest.setCallId(request.getCallId());
+                        stompSession.send("/api/taxi-driver/accept-call", acceptRequest);
+                        System.out.println("Call accept");
+                    } else {
+                        CallRejectRequest reject = new CallRejectRequest();
+                        reject.setCallId(request.getCallId());
+                        stompSession.send("/api/taxi-driver/reject-call", reject);
+                        System.out.println("Call rejection");
+
+                        processingCall = false;
+                    }
+
+                } catch (InterruptedException e) {
+                    System.out.println("Consumer thread closed");
+                    break;
+                }
+            }
+        }).start();
+    }
 
     //콜 수락 결과 수신
     private void subscribeAcceptCallResult() {
@@ -162,32 +228,27 @@ public class ClientService {
                 if (payload instanceof CallAcceptResponse response) {
                     MatchingResponse matching = response.getMatchingResponse();
                     if (matching != null) {
-                        System.out.println("Call accept success");
-                        System.out.println("Customer id : " + matching.getCustomerLoginId());
-                        System.out.println("customer origin : " + matching.getExpectedOrigin());
-                        System.out.println("customer des : " + matching.getExpectedDestination());
                         currentCustomerLoginId = matching.getCustomerLoginId();
                         driving = true;
+                        callQueue.clear();
+                        processingCall = false;
 
-                        //예약중!!!!!
+                        //예약 중!!!!!!
                         sendTaxiDriverStatus(TaxiDriverStatus.RESERVED);
-                        System.out.println("reserved");
-                        readyToReceiveCall = false;
 
-                        //출발
+                        //손님 탔음
                         scheduler.schedule(() -> {
+                            System.out.println("on Driving~");
                             sendTaxiDriverStatus(TaxiDriverStatus.ON_DRIVING);
-                            System.out.println("on driving");
                         }, 5, TimeUnit.SECONDS);
 
-                        //손님 내려줌
+                        //손님 내림
                         scheduler.schedule(() -> {
+                            System.out.println("pickup success");
                             currentCustomerLoginId = null;
                             driving = false;
                             sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
-                            System.out.println("available");
                         }, 10, TimeUnit.SECONDS);
-
                     }
                 }
             }
@@ -244,6 +305,12 @@ public class ClientService {
             try {
                 //일단은 응답 받으면 checkReceive가 true니깐 그때 받을 수 있게 해둠
                 if (stompSession != null && stompSession.isConnected()) {
+
+                    if(currentStatus == TaxiDriverStatus.OFF_DUTY) {
+                        System.out.println("OFF DUTY");
+                        return;
+                    }
+
                     UpdateLocationRequest locationRequest = new UpdateLocationRequest();
                     locationRequest.setCustomerLoginId(currentCustomerLoginId);
 
@@ -262,26 +329,7 @@ public class ClientService {
         }, 0, 5, TimeUnit.SECONDS);
     }
 
-    //test용
-    public ScheduledExecutorService getScheduler() {
-        return scheduler;
-    }
 
-    public String getCurrentCustomerLoginId() {
-        return currentCustomerLoginId;
-    }
-
-    public void setCurrentCustomerLoginId(String id) {
-        this.currentCustomerLoginId = id;
-    }
-
-    public boolean isDriving() {
-        return driving;
-    }
-
-    public void setDriving(boolean value) {
-        this.driving = value;
-    }
 
 
 

@@ -1,5 +1,6 @@
 package application;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import domain.model.*;
 
 import java.lang.reflect.Type;
@@ -24,6 +25,8 @@ public class ClientService {
     private boolean driving = false;
     //손님 없으면 null로 보내기 위함
     private String currentCustomerLoginId = null;
+    //콜 수락 시 저장
+    private Long currentCallId = null;
     //위치 전송 플래그
     private boolean checkReceive = false;
     //큐 필드 추가 하나으 ㅣ쓰레드가 callqueue를 3초에 한번씩 조회 하나씩 다 검증 배차 됐나 안됐나 ㅋㅋ
@@ -81,7 +84,8 @@ public class ClientService {
                 //배차 되었는데 취소당함
                 subscribeDispatchCanceled();
 
-
+                //손님 정보
+                subscribeRideStatus();
             }
 
             @Override
@@ -232,8 +236,9 @@ public class ClientService {
                     if (accept) {
                         try {
                             CallAcceptRequest acceptRequest = new CallAcceptRequest();
+                            currentCallId = request.getCallId();
                             acceptRequest.setCallId(request.getCallId());
-                            stompSession.send("/api/taxi-driver/accept-call", acceptRequest);
+                            stompSession.send("/app/taxi-driver/accept-call", acceptRequest);
                             System.out.println("Call accept");
                         } catch (Exception e) {
                             System.out.println("call requesting exception : " + e.getMessage());
@@ -243,7 +248,7 @@ public class ClientService {
                         try {
                             CallRejectRequest reject = new CallRejectRequest();
                             reject.setCallId(request.getCallId());
-                            stompSession.send("/api/taxi-driver/reject-call", reject);
+                            stompSession.send("/app/taxi-driver/reject-call", reject);
                             System.out.println("Call rejection");
                         } catch (Exception e) {
                             System.out.println("call reject exception : " + e.getMessage());
@@ -269,6 +274,7 @@ public class ClientService {
 
             @Override
             public void handleFrame(StompHeaders headers, Object payload) {
+
                 if (payload instanceof CallAcceptResponse response) {
 
                     if (response.getCustomerLoginId() != null) {
@@ -278,30 +284,15 @@ public class ClientService {
                         callQueue.clear();
                         processingCall = false;
 
-                        //예약 중!!!!!!
                         sendTaxiDriverStatus(TaxiDriverStatus.RESERVED);
 
-                        //손님 탔음
-                        scheduler.schedule(() -> {
-                            System.out.println("on Driving~");
-                            sendTaxiDriverStatus(TaxiDriverStatus.ON_DRIVING);
-                        }, 5, TimeUnit.SECONDS);
+                        //승차 요청
+                        scheduler.schedule(() -> sendRideStart(currentCallId), 5, TimeUnit.SECONDS);
 
-                        //손님 내림
-                        scheduler.schedule(() -> {
-                            System.out.println("pickup success");
-                            currentCustomerLoginId = null;
-                            driving = false;
-                            sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
-                        }, 10, TimeUnit.SECONDS);
+                        //하차 요청
+                        scheduler.schedule(() -> sendRideFinish(currentCallId), 15, TimeUnit.SECONDS);
 
-                        //택시 휴가~
-                        scheduler.schedule(() -> {
-                            System.out.println("off duty");
-                            currentCustomerLoginId = null;
-                            driving = false;
-                            sendTaxiDriverStatus(TaxiDriverStatus.OFF_DUTY);
-                        }, 10, TimeUnit.SECONDS);
+
                     }
                 } else {
                     //이미 누가 선점 해버림
@@ -311,6 +302,88 @@ public class ClientService {
             }
         });
     }
+
+    // 승차/하차 응답
+    private void subscribeRideStatus() {
+        stompSession.subscribe("/user/queue/ride-status", new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                //DrivingInfoResponse, DrivingSummaryResponse
+                return  Object.class;
+            }
+
+            @Override
+            public void handleFrame(StompHeaders headers, Object payload) {
+                if (payload instanceof DrivingInfoResponse info && info.isDrivingStarted()) {
+                    System.out.println("승차 완료됨");
+                    currentStatus = TaxiDriverStatus.ON_DRIVING;
+
+                } else if (payload instanceof DrivingSummaryResponse summary) {
+                    if (summary.getDrivingStatus() == DrivingStatus.COMPLETE) {
+                        System.out.println("하차 완료됨 (고객: " + summary.getCustomerLoginId() + ")");
+
+                        // 내부 상태 초기화
+                        currentCallId = null;
+                        currentCustomerLoginId = null;
+                        driving = false;
+
+                        // 상태는 서버가 AVAILABLE로 자동 전환하므로 별도 필요 없음
+                        currentStatus = TaxiDriverStatus.AVAILABLE;
+
+                        //하차 후 off duty
+                        scheduler.schedule(() -> {
+                            sendTaxiDriverStatus(TaxiDriverStatus.OFF_DUTY);
+                            currentStatus = TaxiDriverStatus.OFF_DUTY;
+                        }, 10, TimeUnit.SECONDS);
+
+
+                        //다시 빈 차 상태
+                        scheduler.schedule(() -> {
+                            sendTaxiDriverStatus(TaxiDriverStatus.AVAILABLE);
+                            currentStatus = TaxiDriverStatus.AVAILABLE;
+                        }, 20, TimeUnit.SECONDS);
+
+
+                    } else {
+                        System.out.println("운행 종료 상태: " + summary.getDrivingStatus());
+                    }
+
+                } else {
+                    System.out.println("ride-status 알 수 없는 응답: " + payload);
+                }
+            }
+        });
+    }
+
+    //승차 요청
+    public void sendRideStart(Long callId) {
+        if (stompSession == null || !stompSession.isConnected()) {
+            System.out.println("세션 연결 안됨");
+            return;
+        }
+
+        CallIdRequest request = new CallIdRequest();
+        request.setCallId(callId);
+
+        stompSession.send("/app/taxi-driver/ride-start", request);
+        System.out.println("sendRide callId = " + callId);
+    }
+
+    //하차 요청
+    public void sendRideFinish(Long callId) {
+        if (stompSession == null || !stompSession.isConnected()) {
+            System.out.println("세션 연결 안됨");
+            return;
+        }
+
+        CallIdRequest request = new CallIdRequest();
+        request.setCallId(callId);
+
+        stompSession.send("/app/taxi-driver/ride-finish", request);
+        System.out.println("sendPickup callId = " + callId);
+    }
+
+
 
     //콜 거절 결과 수신
     private void subscribeRejectCallResult() {
@@ -366,7 +439,9 @@ public class ClientService {
 
             @Override
             public void handleFrame(StompHeaders headers, Object payload) {
-                System.out.println("Error Message : " + payload);
+                if (payload instanceof ErrorResponse response) {
+                    System.out.println("Error Message: " + response.getMessage());
+                }
             }
         });
     }

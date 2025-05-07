@@ -1,7 +1,9 @@
-import application.ClientService;
-import application.TaxiDriverRunner;
+
 
 import java.util.concurrent.CountDownLatch;
+
+import application.ClientService;
+import application.TaxiDriverRunner;
 
 public class TaxiDriverApplication {
 
